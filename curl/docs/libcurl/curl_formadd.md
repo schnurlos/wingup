@@ -105,7 +105,7 @@ you must make sure strlen() on the data pointer returns zero.
 
 ## CURLFORM_CONTENTSLENGTH
 
-(This option is deprecated. Use *CURLFORM_CONTENTLEN* instead!)
+(This option is deprecated. Use *CURLFORM_CONTENTLEN* instead.)
 
 followed by a long giving the length of the contents. Note that for
 *CURLFORM_STREAM* contents, this option is mandatory.
@@ -316,4 +316,4 @@ filenames are now escaped before transmission.
 # RETURN VALUE
 
 0 means everything was OK, non-zero means an error occurred corresponding to a
-CURL_FORMADD_* constant defined in *\<curl/curl.h\>*.
+`CURL_FORMADD_*` constant defined in *\<curl/curl.h\>*.

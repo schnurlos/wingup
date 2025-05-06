@@ -25,7 +25,7 @@
 
 #include "memdebug.h"
 
-static char data[]=
+static char testdata[]=
   "dummy\n";
 
 struct WriteThis {
@@ -44,7 +44,7 @@ static void free_callback(void *userp)
 static size_t read_callback(char *ptr, size_t size, size_t nmemb, void *userp)
 {
   struct WriteThis *pooh = (struct WriteThis *)userp;
-  int eof = !*pooh->readptr;
+  int eof;
 
   if(size*nmemb < 1)
     return 0;
@@ -94,8 +94,8 @@ CURLcode test(char *URL)
   test_setopt(easy, CURLOPT_HEADER, 1L);
 
   /* Prepare the callback structure. */
-  pooh.readptr = data;
-  pooh.sizeleft = (curl_off_t) strlen(data);
+  pooh.readptr = testdata;
+  pooh.sizeleft = (curl_off_t) strlen(testdata);
   pooh.freecount = 0;
 
   /* Build the mime tree. */

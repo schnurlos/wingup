@@ -40,16 +40,13 @@
 #include <inet.h>
 #endif
 
-#include <setjmp.h>
-#include <signal.h>
-
 #include "urldata.h"
 #include "connect.h"
 #include "cfilters.h"
 #include "multiif.h"
 #include "select.h"
 #include "curl_trc.h"
-
+#include "memdebug.h"
 
 static CURL *easy;
 
@@ -134,13 +131,12 @@ static void cf_test_destroy(struct Curl_cfilter *cf, struct Curl_easy *data)
 
 static CURLcode cf_test_connect(struct Curl_cfilter *cf,
                                 struct Curl_easy *data,
-                                bool blocking, bool *done)
+                                bool *done)
 {
   struct cf_test_ctx *ctx = cf->ctx;
   timediff_t duration_ms;
 
   (void)data;
-  (void)blocking;
   *done = FALSE;
   duration_ms = Curl_timediff(Curl_now(), ctx->started);
   if(duration_ms >= ctx->fail_delay_ms) {
@@ -234,7 +230,7 @@ static CURLcode cf_test_create(struct Curl_cfilter **pcf,
   Curl_expire(data, ctx->fail_delay_ms, EXPIRE_RUN_NOW);
 
 out:
-  *pcf = (!result)? cf : NULL;
+  *pcf = (!result) ? cf : NULL;
   if(result) {
     free(cf);
     free(ctx);
@@ -284,9 +280,9 @@ static void check_result(struct test_case *tc,
   if(tr->cf6.creations && tr->cf4.creations && tc->pref_family) {
     /* did ipv4 and ipv6 both, expect the preferred family to start right arway
      * with the other being delayed by the happy_eyeball_timeout */
-    struct ai_family_stats *stats1 = !strcmp(tc->pref_family, "v6")?
+    struct ai_family_stats *stats1 = !strcmp(tc->pref_family, "v6") ?
                                      &tr->cf6 : &tr->cf4;
-    struct ai_family_stats *stats2 = !strcmp(tc->pref_family, "v6")?
+    struct ai_family_stats *stats2 = !strcmp(tc->pref_family, "v6") ?
                                      &tr->cf4 : &tr->cf6;
 
     if(stats1->first_created > 100) {
@@ -397,7 +393,7 @@ UNITTEST_START
 
   size_t i;
 
-  for(i = 0; i < sizeof(TEST_CASES)/sizeof(TEST_CASES[0]); ++i) {
+  for(i = 0; i < CURL_ARRAYSIZE(TEST_CASES); ++i) {
     test_connect(&TEST_CASES[i]);
   }
 

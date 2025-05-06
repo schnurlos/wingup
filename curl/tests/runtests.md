@@ -40,6 +40,11 @@ Prefix a test number with a tilde (~) to still run it, but ignore the results.
 It is also possible to specify tests based on a keyword describing the test(s)
 to run, like `FTPS`. The keywords are strings used in the individual tests.
 
+Features are included as keywords with the `feat:` prefix (e.g., `feat:debug`).
+Specify a feature to run only tests requiring it, or exclude tests using
+`!feat:<feature>`, like `!feat:proxy`, to disable tests which depend on that
+feature.
+
 You can also specify keywords with a leading exclamation point and the keyword
 or phrase, like "!HTTP NTLM auth" to run all tests **except** those using this
 keyword. Remember that the exclamation marks and spaces need to be quoted
@@ -91,7 +96,7 @@ Provide a path to a curl binary to talk to APIs (currently only CI test APIs).
 
 Display test results in automake style output (`PASS/FAIL: [number] [name]`).
 
-## `-c\<curl\>`
+## `-c \<curl\>`
 
 Provide a path to a custom curl binary to run the tests with. Default is the
 curl executable in the build tree.
@@ -113,7 +118,7 @@ exclusion, the second field contains a pattern and the final field contains
 the reason why matching tests should be skipped. The exclusion types are
 *keyword*, *test*, and *tool*.
 
-## `-e`
+## `-e` or `--test-event`
 
 Run the test event-based (if possible). This makes runtests invoke curl with
 --test-event option. This option only works if both curl and libcurl were
@@ -150,10 +155,10 @@ Displays a help text about this program's command line options.
 Spawn the given number of processes to run tests in. This defaults to 0 to run
 tests serially within a single process. Using a number greater than one allows
 multiple tests to run in parallel, speeding up a test run. The optimum number
-is dependent on the system and set of tests to run, but 7 times number of CPU
-cores is a good figure to start with, or 1.3 times number of CPU cores if
-Valgrind is in use. Enabling parallel tests is not recommended in conjunction
-with the -g option.
+is dependent on the system and set of tests to run, but 7 times the number of
+CPU cores is a good figure to start with, or 1.3 times if Valgrind is in use,
+or 5 times for torture tests. Enabling parallel tests is not recommended in
+conjunction with the -g option.
 
 ## `-k`
 
@@ -214,11 +219,6 @@ Display run time statistics. (Requires the `Perl Time::HiRes` module)
 
 Display full run time statistics. (Requires the `Perl Time::HiRes` module)
 
-## `-rm`
-
-Force removal of files by killing locking processes. (Windows only, requires
-the **Sysinternals** `handle[64].exe` to be on PATH)
-
 ## `--repeat=[num]`
 
 This repeats the given set of test numbers this many times. If no test numbers
@@ -257,6 +257,19 @@ to fail until all allocations have been tested. By setting *num* you can force
 the allocation with that number to be set to fail at once instead of looping
 through everyone, which is handy when debugging and then often in combination
 with *-g*.
+
+## `--test-duphandle`
+
+Passes the `--test-duphandle` option to curl when invoked. This command line
+option only exists in debug builds and runs curl normally, but duplicates the
+easy handle before the transfer and use the duplicate instead of the original
+handle. This verifies that the duplicate works exactly as good as the original
+handle.
+
+Because of how the curl tool uses a share object to store and keep some data,
+not everything is however perfectly copied in the duplicate. In particular
+HSTS data is not. A specific test case can be set to avoid using
+`--test-duphandle` by disabling it on a per test basis.
 
 ## `-u`
 

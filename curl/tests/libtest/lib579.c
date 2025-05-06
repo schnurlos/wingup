@@ -25,7 +25,7 @@
 
 #include "memdebug.h"
 
-static const char * const post[]={
+static const char * const testpost[]={
   "one",
   "two",
   "three",
@@ -45,9 +45,13 @@ static size_t last_ul_total = 0;
 static void progress_final_report(void)
 {
   FILE *moo = fopen(libtest_arg2, "ab");
-  fprintf(moo, "Progress: end UL %zu/%zu\n", last_ul, last_ul_total);
+  fprintf(moo ? moo : stderr, "Progress: end UL %zu/%zu\n",
+                              last_ul, last_ul_total);
+  if(moo)
+    fclose(moo);
+  else
+    fprintf(stderr, "Progress: end UL, can't open %s\n", libtest_arg2);
   started = FALSE;
-  fclose(moo);
 }
 
 static int progress_callback(void *clientp, double dltotal, double dlnow,
@@ -65,9 +69,13 @@ static int progress_callback(void *clientp, double dltotal, double dlnow,
   last_ul_total = (size_t)ultotal;
   if(!started) {
     FILE *moo = fopen(libtest_arg2, "ab");
-    fprintf(moo, "Progress: start UL %zu/%zu\n", last_ul, last_ul_total);
+    fprintf(moo ? moo : stderr, "Progress: start UL %zu/%zu\n",
+                                last_ul, last_ul_total);
+    if(moo)
+      fclose(moo);
+    else
+      fprintf(stderr, "Progress: start UL, can't open %s\n", libtest_arg2);
     started = TRUE;
-    fclose(moo);
   }
 
   return 0;
@@ -81,7 +89,7 @@ static size_t read_callback(char *ptr, size_t size, size_t nmemb, void *userp)
   if(size*nmemb < 1)
     return 0;
 
-  data = post[pooh->counter];
+  data = testpost[pooh->counter];
 
   if(data) {
     size_t len = strlen(data);

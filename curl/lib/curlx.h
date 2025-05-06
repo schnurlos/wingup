@@ -37,11 +37,6 @@
 #include "strcase.h"
 /* "strcase.h" provides the strcasecompare protos */
 
-#include "strtoofft.h"
-/* "strtoofft.h" provides this function: curlx_strtoofft(), returns a
-   curl_off_t number from a given string.
-*/
-
 #include "nonblock.h"
 /* "nonblock.h" provides curlx_nonblock() */
 
@@ -66,13 +61,9 @@
 #include "version_win32.h"
 /* "version_win32.h" provides curlx_verify_windows_version() */
 
-/* Now setup curlx_ * names for the functions that are to become curlx_ and
-   be removed from a future libcurl official API:
-   curlx_getenv
-   curlx_mprintf (and its variations)
-   curlx_strcasecompare
-   curlx_strncasecompare
+#include "strparse.h"
+/* The curlx_str_* parsing functions */
 
-*/
+#define curlx_safefree(x) Curl_safefree(x)
 
 #endif /* HEADER_CURL_CURLX_H */

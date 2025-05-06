@@ -29,7 +29,7 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include "bufq.h"
-#include "hash.h"
+#include "hash_offt.h"
 #include "urldata.h"
 #include "cfilters.h"
 #include "cf-socket.h"
@@ -97,7 +97,7 @@ struct cf_quiche_ctx {
   struct curltime started_at;        /* time the current attempt started */
   struct curltime handshake_at;      /* time connect handshake finished */
   struct bufc_pool stream_bufcp;     /* chunk pool for streams */
-  struct Curl_hash streams;          /* hash `data->mid` to `stream_ctx` */
+  struct Curl_hash_offt streams;     /* hash `data->mid` to `stream_ctx` */
   curl_off_t data_recvd;
   BIT(initialized);
   BIT(goaway);                       /* got GOAWAY from server */
@@ -115,7 +115,7 @@ static void quiche_debug_log(const char *line, void *argp)
 }
 #endif
 
-static void h3_stream_hash_free(void *stream);
+static void h3_stream_hash_free(curl_off_t id, void *stream);
 
 static void cf_quiche_ctx_init(struct cf_quiche_ctx *ctx)
 {
@@ -142,8 +142,7 @@ static void cf_quiche_ctx_free(struct cf_quiche_ctx *ctx)
     Curl_ssl_peer_cleanup(&ctx->peer);
     vquic_ctx_free(&ctx->q);
     Curl_bufcp_free(&ctx->stream_bufcp);
-    Curl_hash_clean(&ctx->streams);
-    Curl_hash_destroy(&ctx->streams);
+    Curl_hash_offt_destroy(&ctx->streams);
   }
   free(ctx);
 }
@@ -190,30 +189,73 @@ static void h3_stream_ctx_free(struct stream_ctx *stream)
   free(stream);
 }
 
-static void h3_stream_hash_free(void *stream)
+static void h3_stream_hash_free(curl_off_t id, void *stream)
 {
+  (void)id;
   DEBUGASSERT(stream);
   h3_stream_ctx_free((struct stream_ctx *)stream);
 }
 
-static void check_resumes(struct Curl_cfilter *cf,
-                          struct Curl_easy *data)
+typedef bool cf_quiche_svisit(struct Curl_cfilter *cf,
+                              struct Curl_easy *sdata,
+                              struct stream_ctx *stream,
+                              void *user_data);
+
+struct cf_quiche_visit_ctx {
+  struct Curl_cfilter *cf;
+  struct Curl_multi *multi;
+  cf_quiche_svisit *cb;
+  void *user_data;
+};
+
+static bool cf_quiche_stream_do(curl_off_t mid, void *val, void *user_data)
+{
+  struct cf_quiche_visit_ctx *vctx = user_data;
+  struct stream_ctx *stream = val;
+  struct Curl_easy *sdata = Curl_multi_get_handle(vctx->multi, mid);
+  if(sdata)
+    return vctx->cb(vctx->cf, sdata, stream, vctx->user_data);
+  return TRUE;
+}
+
+static void cf_quiche_for_all_streams(struct Curl_cfilter *cf,
+                                      struct Curl_multi *multi,
+                                      cf_quiche_svisit *do_cb,
+                                      void *user_data)
 {
   struct cf_quiche_ctx *ctx = cf->ctx;
-  struct Curl_llist_node *e;
+  struct cf_quiche_visit_ctx vctx;
+  vctx.cf = cf;
+  vctx.multi = multi;
+  vctx.cb = do_cb;
+  vctx.user_data = user_data;
+  Curl_hash_offt_visit(&ctx->streams, cf_quiche_stream_do, &vctx);
+}
 
-  DEBUGASSERT(data->multi);
-  for(e = Curl_llist_head(&data->multi->process); e; e = Curl_node_next(e)) {
-    struct Curl_easy *sdata = Curl_node_elem(e);
-    if(sdata->conn == data->conn) {
-      struct stream_ctx *stream = H3_STREAM_CTX(ctx, sdata);
-      if(stream && stream->quic_flow_blocked) {
-        stream->quic_flow_blocked = FALSE;
-        Curl_expire(data, 0, EXPIRE_RUN_NOW);
-        CURL_TRC_CF(data, cf, "[%"FMT_PRIu64"] unblock", stream->id);
-      }
-    }
+static bool cf_quiche_do_resume(struct Curl_cfilter *cf,
+                                struct Curl_easy *sdata,
+                                struct stream_ctx *stream,
+                                void *user_data)
+{
+  (void)user_data;
+  if(stream->quic_flow_blocked) {
+    stream->quic_flow_blocked = FALSE;
+    Curl_expire(sdata, 0, EXPIRE_RUN_NOW);
+    CURL_TRC_CF(sdata, cf, "[%"FMT_PRIu64"] unblock", stream->id);
   }
+  return TRUE;
+}
+
+static bool cf_quiche_do_expire(struct Curl_cfilter *cf,
+                                struct Curl_easy *sdata,
+                                struct stream_ctx *stream,
+                                void *user_data)
+{
+  (void)stream;
+  (void)user_data;
+  CURL_TRC_CF(sdata, cf, "conn closed, expire transfer");
+  Curl_expire(sdata, 0, EXPIRE_RUN_NOW);
+  return TRUE;
 }
 
 static CURLcode h3_data_setup(struct Curl_cfilter *cf,
@@ -268,8 +310,8 @@ static void h3_data_done(struct Curl_cfilter *cf, struct Curl_easy *data)
   }
 }
 
-static void drain_stream(struct Curl_cfilter *cf,
-                         struct Curl_easy *data)
+static void h3_drain_stream(struct Curl_cfilter *cf,
+                            struct Curl_easy *data)
 {
   struct cf_quiche_ctx *ctx = cf->ctx;
   struct stream_ctx *stream = H3_STREAM_CTX(ctx, data);
@@ -285,52 +327,12 @@ static void drain_stream(struct Curl_cfilter *cf,
   }
 }
 
-static struct Curl_easy *get_stream_easy(struct Curl_cfilter *cf,
-                                         struct Curl_easy *data,
-                                         curl_uint64_t stream_id,
-                                         struct stream_ctx **pstream)
-{
-  struct cf_quiche_ctx *ctx = cf->ctx;
-  struct stream_ctx *stream;
-
-  (void)cf;
-  stream = H3_STREAM_CTX(ctx, data);
-  if(stream && stream->id == stream_id) {
-    *pstream = stream;
-    return data;
-  }
-  else {
-    struct Curl_llist_node *e;
-    DEBUGASSERT(data->multi);
-    for(e = Curl_llist_head(&data->multi->process); e; e = Curl_node_next(e)) {
-      struct Curl_easy *sdata = Curl_node_elem(e);
-      if(sdata->conn != data->conn)
-        continue;
-      stream = H3_STREAM_CTX(ctx, sdata);
-      if(stream && stream->id == stream_id) {
-        *pstream = stream;
-        return sdata;
-      }
-    }
-  }
-  *pstream = NULL;
-  return NULL;
-}
-
 static void cf_quiche_expire_conn_closed(struct Curl_cfilter *cf,
                                          struct Curl_easy *data)
 {
-  struct Curl_llist_node *e;
-
   DEBUGASSERT(data->multi);
   CURL_TRC_CF(data, cf, "conn closed, expire all transfers");
-  for(e = Curl_llist_head(&data->multi->process); e; e = Curl_node_next(e)) {
-    struct Curl_easy *sdata = Curl_node_elem(e);
-    if(sdata == data || sdata->conn != data->conn)
-      continue;
-    CURL_TRC_CF(sdata, cf, "conn closed, expire transfer");
-    Curl_expire(sdata, 0, EXPIRE_RUN_NOW);
-  }
+  cf_quiche_for_all_streams(cf, data->multi, cf_quiche_do_expire, NULL);
 }
 
 /*
@@ -557,14 +559,48 @@ static CURLcode h3_process_event(struct Curl_cfilter *cf,
   return result;
 }
 
+static CURLcode cf_quiche_ev_process(struct Curl_cfilter *cf,
+                                     struct Curl_easy *data,
+                                     struct stream_ctx *stream,
+                                     quiche_h3_event *ev)
+{
+  CURLcode result = h3_process_event(cf, data, stream, ev);
+  h3_drain_stream(cf, data);
+  if(result)
+    CURL_TRC_CF(data, cf, "error processing event %s "
+                "for [%"FMT_PRIu64"] -> %d", cf_ev_name(ev),
+                stream->id, result);
+  return result;
+}
+
+struct cf_quich_disp_ctx {
+  curl_uint64_t stream_id;
+  struct Curl_cfilter *cf;
+  struct Curl_multi *multi;
+  quiche_h3_event *ev;
+  CURLcode result;
+};
+
+static bool cf_quiche_disp_event(curl_off_t mid, void *val, void *user_data)
+{
+  struct cf_quich_disp_ctx *dctx = user_data;
+  struct stream_ctx *stream = val;
+
+  if(stream->id == dctx->stream_id) {
+    struct Curl_easy *sdata = Curl_multi_get_handle(dctx->multi, mid);
+    if(sdata)
+      dctx->result = cf_quiche_ev_process(dctx->cf, sdata, stream, dctx->ev);
+    return FALSE; /* stop iterating */
+  }
+  return TRUE;
+}
+
 static CURLcode cf_poll_events(struct Curl_cfilter *cf,
                                struct Curl_easy *data)
 {
   struct cf_quiche_ctx *ctx = cf->ctx;
   struct stream_ctx *stream = NULL;
-  struct Curl_easy *sdata;
   quiche_h3_event *ev;
-  CURLcode result;
 
   /* Take in the events and distribute them to the transfers. */
   while(ctx->h3c) {
@@ -576,28 +612,27 @@ static CURLcode cf_poll_events(struct Curl_cfilter *cf,
       CURL_TRC_CF(data, cf, "error poll: %"FMT_PRId64, stream3_id);
       return CURLE_HTTP3;
     }
-
-    sdata = get_stream_easy(cf, data, stream3_id, &stream);
-    if(!sdata || !stream) {
-      CURL_TRC_CF(data, cf, "discard event %s for unknown [%"FMT_PRId64"]",
-                  cf_ev_name(ev), stream3_id);
-    }
     else {
-      result = h3_process_event(cf, sdata, stream, ev);
-      drain_stream(cf, sdata);
-      if(result) {
-        CURL_TRC_CF(data, cf, "error processing event %s "
-                    "for [%"FMT_PRIu64"] -> %d", cf_ev_name(ev),
-                    stream3_id, result);
-        if(data == sdata) {
-          /* Only report this error to the caller if it is about the
-           * transfer we were called with. Otherwise we fail a transfer
-           * due to a problem in another one. */
-          quiche_h3_event_free(ev);
+      struct cf_quich_disp_ctx dctx;
+      dctx.stream_id = (curl_uint64_t)stream3_id;
+      dctx.cf = cf;
+      dctx.multi = data->multi;
+      dctx.ev = ev;
+      dctx.result = CURLE_OK;
+      stream = H3_STREAM_CTX(ctx, data);
+      if(stream && stream->id == dctx.stream_id) {
+        /* event for calling transfer */
+        CURLcode result = cf_quiche_ev_process(cf, data, stream, ev);
+        quiche_h3_event_free(ev);
+        if(result)
           return result;
-        }
       }
-      quiche_h3_event_free(ev);
+      else {
+        /* another transfer, do not return errors, as they are not for
+         * the calling transfer */
+        Curl_hash_offt_visit(&ctx->streams, cf_quiche_disp_event, &dctx);
+        quiche_h3_event_free(ev);
+      }
     }
   }
   return CURLE_OK;
@@ -627,7 +662,8 @@ static CURLcode recv_pkt(const unsigned char *pkt, size_t pktlen,
   recv_info.from = (struct sockaddr *)remote_addr;
   recv_info.from_len = remote_addrlen;
 
-  nread = quiche_conn_recv(ctx->qconn, (unsigned char *)pkt, pktlen,
+  nread = quiche_conn_recv(ctx->qconn,
+                           (unsigned char *)CURL_UNCONST(pkt), pktlen,
                            &recv_info);
   if(nread < 0) {
     if(QUICHE_ERR_DONE == nread) {
@@ -686,7 +722,8 @@ static CURLcode cf_process_ingress(struct Curl_cfilter *cf,
   if(rctx.pkts > 0) {
     /* quiche digested ingress packets. It might have opened flow control
      * windows again. */
-    check_resumes(cf, data);
+    DEBUGASSERT(data->multi);
+    cf_quiche_for_all_streams(cf, data->multi, cf_quiche_do_resume, NULL);
   }
   return cf_poll_events(cf, data);
 }
@@ -818,7 +855,7 @@ static ssize_t recv_closed_stream(struct Curl_cfilter *cf,
   if(stream->reset) {
     failf(data,
           "HTTP/3 stream %" FMT_PRIu64 " reset by server", stream->id);
-    *err = data->req.bytecount? CURLE_PARTIAL_FILE : CURLE_HTTP3;
+    *err = data->req.bytecount ? CURLE_PARTIAL_FILE : CURLE_HTTP3;
     CURL_TRC_CF(data, cf, "[%" FMT_PRIu64 "] cf_recv, was reset -> %d",
                 stream->id, *err);
   }
@@ -882,7 +919,7 @@ static ssize_t cf_quiche_recv(struct Curl_cfilter *cf, struct Curl_easy *data,
 
   if(nread > 0) {
     if(stream->closed)
-      drain_stream(cf, data);
+      h3_drain_stream(cf, data);
   }
   else {
     if(stream->closed) {
@@ -924,10 +961,10 @@ static ssize_t cf_quiche_send_body(struct Curl_cfilter *cf,
   ssize_t nwritten;
 
   nwritten = quiche_h3_send_body(ctx->h3c, ctx->qconn, stream->id,
-                                 (uint8_t *)buf, len, eos);
+                                 (uint8_t *)CURL_UNCONST(buf), len, eos);
   if(nwritten == QUICHE_H3_ERR_DONE || (nwritten == 0 && len > 0)) {
-    /* TODO: we seem to be blocked on flow control and should HOLD
-     * sending. But when do we open again? */
+    /* Blocked on flow control and should HOLD sending. But when do we open
+     * again? */
     if(!quiche_conn_stream_writable(ctx->qconn, stream->id, len)) {
       CURL_TRC_CF(data, cf, "[%" FMT_PRIu64 "] send_body(len=%zu) "
                   "-> window exhausted", stream->id, len);
@@ -1146,7 +1183,7 @@ out:
     nwritten = -1;
   }
   CURL_TRC_CF(data, cf, "[%" FMT_PRIu64 "] cf_send(len=%zu) -> %zd, %d",
-              stream? stream->id : (curl_uint64_t)~0, len, nwritten, *err);
+              stream ? stream->id : (curl_uint64_t)~0, len, nwritten, *err);
   return nwritten;
 }
 
@@ -1204,10 +1241,10 @@ static CURLcode h3_data_pause(struct Curl_cfilter *cf,
                               struct Curl_easy *data,
                               bool pause)
 {
-  /* TODO: there seems right now no API in quiche to shrink/enlarge
-   * the streams windows. As we do in HTTP/2. */
+  /* There seems to exist no API in quiche to shrink/enlarge the streams
+   * windows. As we do in HTTP/2. */
   if(!pause) {
-    drain_stream(cf, data);
+    h3_drain_stream(cf, data);
     Curl_expire(data, 0, EXPIRE_RUN_NOW);
   }
   return CURLE_OK;
@@ -1227,9 +1264,6 @@ static CURLcode cf_quiche_data_event(struct Curl_cfilter *cf,
     break;
   case CF_CTRL_DATA_PAUSE:
     result = h3_data_pause(cf, data, (arg1 != 0));
-    break;
-  case CF_CTRL_DATA_DETACH:
-    h3_data_done(cf, data);
     break;
   case CF_CTRL_DATA_DONE:
     h3_data_done(cf, data);
@@ -1270,6 +1304,9 @@ static CURLcode cf_quiche_ctx_open(struct Curl_cfilter *cf,
   int rv;
   CURLcode result;
   const struct Curl_sockaddr_ex *sockaddr;
+static const struct alpn_spec ALPN_SPEC_H3 = {
+  { "h3" }, 1
+};
 
   DEBUGASSERT(ctx->q.sockfd != CURL_SOCKET_BAD);
   DEBUGASSERT(ctx->initialized);
@@ -1278,16 +1315,12 @@ static CURLcode cf_quiche_ctx_open(struct Curl_cfilter *cf,
   if(result)
     return result;
 
-  result = Curl_ssl_peer_init(&ctx->peer, cf, TRNSPRT_QUIC);
-  if(result)
-    return result;
-
   ctx->cfg = quiche_config_new(QUICHE_PROTOCOL_VERSION);
   if(!ctx->cfg) {
     failf(data, "cannot create quiche config");
     return CURLE_FAILED_INIT;
   }
-  quiche_config_enable_pacing(ctx->cfg, false);
+  quiche_config_enable_pacing(ctx->cfg, FALSE);
   quiche_config_set_max_idle_timeout(ctx->cfg, CURL_QUIC_MAX_IDLE_MS);
   quiche_config_set_initial_max_data(ctx->cfg, (1 * 1024 * 1024)
     /* (QUIC_MAX_STREAMS/2) * H3_STREAM_WINDOW_SIZE */);
@@ -1305,15 +1338,12 @@ static CURLcode cf_quiche_ctx_open(struct Curl_cfilter *cf,
     10 * QUIC_MAX_STREAMS * H3_STREAM_WINDOW_SIZE);
   quiche_config_set_max_stream_window(ctx->cfg, 10 * H3_STREAM_WINDOW_SIZE);
   quiche_config_set_application_protos(ctx->cfg,
-                                       (uint8_t *)
-                                       QUICHE_H3_APPLICATION_PROTOCOL,
+                       (uint8_t *)CURL_UNCONST(QUICHE_H3_APPLICATION_PROTOCOL),
                                        sizeof(QUICHE_H3_APPLICATION_PROTOCOL)
                                        - 1);
 
   result = Curl_vquic_tls_init(&ctx->tls, cf, data, &ctx->peer,
-                               QUICHE_H3_APPLICATION_PROTOCOL,
-                               sizeof(QUICHE_H3_APPLICATION_PROTOCOL) - 1,
-                               NULL, NULL, cf);
+                               &ALPN_SPEC_H3, NULL, NULL, cf, NULL);
   if(result)
     return result;
 
@@ -1329,11 +1359,12 @@ static CURLcode cf_quiche_ctx_open(struct Curl_cfilter *cf,
     return CURLE_QUIC_CONNECT_ERROR;
 
   ctx->qconn = quiche_conn_new_with_tls((const uint8_t *)ctx->scid,
-                                      sizeof(ctx->scid), NULL, 0,
-                                      (struct sockaddr *)&ctx->q.local_addr,
-                                      ctx->q.local_addrlen,
-                                      &sockaddr->sa_addr, sockaddr->addrlen,
-                                      ctx->cfg, ctx->tls.ossl.ssl, false);
+                                        sizeof(ctx->scid), NULL, 0,
+                                        (struct sockaddr *)&ctx->q.local_addr,
+                                        ctx->q.local_addrlen,
+                                        &sockaddr->curl_sa_addr,
+                                        sockaddr->addrlen,
+                                        ctx->cfg, ctx->tls.ossl.ssl, FALSE);
   if(!ctx->qconn) {
     failf(data, "cannot create quiche connection");
     return CURLE_OUT_OF_MEMORY;
@@ -1378,14 +1409,13 @@ static CURLcode cf_quiche_verify_peer(struct Curl_cfilter *cf,
   struct cf_quiche_ctx *ctx = cf->ctx;
 
   cf->conn->bits.multiplex = TRUE; /* at least potentially multiplexed */
-  cf->conn->httpversion = 30;
 
   return Curl_vquic_tls_verify_peer(&ctx->tls, cf, data, &ctx->peer);
 }
 
 static CURLcode cf_quiche_connect(struct Curl_cfilter *cf,
                                   struct Curl_easy *data,
-                                  bool blocking, bool *done)
+                                  bool *done)
 {
   struct cf_quiche_ctx *ctx = cf->ctx;
   CURLcode result = CURLE_OK;
@@ -1397,7 +1427,7 @@ static CURLcode cf_quiche_connect(struct Curl_cfilter *cf,
 
   /* Connect the UDP filter first */
   if(!cf->next->connected) {
-    result = Curl_conn_cf_connect(cf->next, data, blocking, done);
+    result = Curl_conn_cf_connect(cf->next, data, done);
     if(result || !*done)
       return result;
   }
@@ -1546,7 +1576,7 @@ static CURLcode cf_quiche_query(struct Curl_cfilter *cf,
     if(!ctx->goaway) {
       max_streams += quiche_conn_peer_streams_left_bidi(ctx->qconn);
     }
-    *pres1 = (max_streams > INT_MAX)? INT_MAX : (int)max_streams;
+    *pres1 = (max_streams > INT_MAX) ? INT_MAX : (int)max_streams;
     CURL_TRC_CF(data, cf, "query conn[%" FMT_OFF_T "]: "
                 "MAX_CONCURRENT -> %d (%zu in use)",
                 cf->conn->connection_id, *pres1, CONN_INUSE(cf->conn));
@@ -1555,7 +1585,7 @@ static CURLcode cf_quiche_query(struct Curl_cfilter *cf,
   case CF_QUERY_CONNECT_REPLY_MS:
     if(ctx->q.got_first_byte) {
       timediff_t ms = Curl_timediff(ctx->q.first_byte_at, ctx->started_at);
-      *pres1 = (ms < INT_MAX)? (int)ms : INT_MAX;
+      *pres1 = (ms < INT_MAX) ? (int)ms : INT_MAX;
     }
     else
       *pres1 = -1;
@@ -1572,10 +1602,13 @@ static CURLcode cf_quiche_query(struct Curl_cfilter *cf,
       *when = ctx->handshake_at;
     return CURLE_OK;
   }
+  case CF_QUERY_HTTP_VERSION:
+    *pres1 = 30;
+    return CURLE_OK;
   default:
     break;
   }
-  return cf->next?
+  return cf->next ?
     cf->next->cft->query(cf->next, data, query, pres1, pres2) :
     CURLE_UNKNOWN_OPTION;
 }
@@ -1619,7 +1652,7 @@ static bool cf_quiche_conn_is_alive(struct Curl_cfilter *cf,
 
 struct Curl_cftype Curl_cft_http3 = {
   "HTTP/3",
-  CF_TYPE_IP_CONNECT | CF_TYPE_SSL | CF_TYPE_MULTIPLEX,
+  CF_TYPE_IP_CONNECT | CF_TYPE_SSL | CF_TYPE_MULTIPLEX | CF_TYPE_HTTP,
   0,
   cf_quiche_destroy,
   cf_quiche_connect,
@@ -1667,7 +1700,7 @@ CURLcode Curl_cf_quiche_create(struct Curl_cfilter **pcf,
   cf->next = udp_cf;
 
 out:
-  *pcf = (!result)? cf : NULL;
+  *pcf = (!result) ? cf : NULL;
   if(result) {
     if(udp_cf)
       Curl_conn_cf_discard_sub(cf, udp_cf, data, TRUE);
@@ -1682,7 +1715,7 @@ bool Curl_conn_is_quiche(const struct Curl_easy *data,
                          const struct connectdata *conn,
                          int sockindex)
 {
-  struct Curl_cfilter *cf = conn? conn->cfilter[sockindex] : NULL;
+  struct Curl_cfilter *cf = conn ? conn->cfilter[sockindex] : NULL;
 
   (void)data;
   for(; cf; cf = cf->next) {

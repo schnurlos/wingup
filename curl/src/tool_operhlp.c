@@ -43,10 +43,10 @@ void clean_getout(struct OperationConfig *config)
 
     while(node) {
       next = node->next;
-      Curl_safefree(node->url);
-      Curl_safefree(node->outfile);
-      Curl_safefree(node->infile);
-      Curl_safefree(node);
+      curlx_safefree(node->url);
+      curlx_safefree(node->outfile);
+      curlx_safefree(node->infile);
+      curlx_safefree(node);
       node = next;
     }
     config->url_list = NULL;
@@ -66,8 +66,7 @@ bool output_expected(const char *url, const char *uploadfile)
 
 bool stdin_upload(const char *uploadfile)
 {
-  return (!strcmp(uploadfile, "-") ||
-          !strcmp(uploadfile, ".")) ? TRUE : FALSE;
+  return !strcmp(uploadfile, "-") || !strcmp(uploadfile, ".");
 }
 
 /* Convert a CURLUcode into a CURLcode */
@@ -123,7 +122,7 @@ CURLcode add_file_name_to_url(CURL *curl, char **inurlp, const char *filename)
       /* We only want the part of the local path that is on the right
          side of the rightmost slash and backslash. */
       const char *filep = strrchr(filename, '/');
-      char *file2 = strrchr(filep?filep:filename, '\\');
+      char *file2 = strrchr(filep ? filep : filename, '\\');
       char *encfile;
 
       if(file2)
@@ -211,16 +210,16 @@ CURLcode get_url_file_name(struct GlobalConfig *global,
         }
       }
 
-      if(pc)
+      if(pc) {
         /* duplicate the string beyond the slash */
-        pc++;
+        *filename = strdup(pc + 1);
+      }
       else {
         /* no slash => empty string, use default */
-        pc = (char *)"curl_response";
-        warnf(global, "No remote file name, uses \"%s\"", pc);
+        *filename = strdup("curl_response");
+        warnf(global, "No remote file name, uses \"%s\"", *filename);
       }
 
-      *filename = strdup(pc);
       curl_free(path);
       if(!*filename)
         return CURLE_OUT_OF_MEMORY;
@@ -229,7 +228,7 @@ CURLcode get_url_file_name(struct GlobalConfig *global,
       {
         char *sanitized;
         SANITIZEcode sc = sanitize_file_name(&sanitized, *filename, 0);
-        Curl_safefree(*filename);
+        curlx_safefree(*filename);
         if(sc) {
           if(sc == SANITIZE_ERR_OUT_OF_MEMORY)
             return CURLE_OUT_OF_MEMORY;
@@ -239,23 +238,6 @@ CURLcode get_url_file_name(struct GlobalConfig *global,
       }
 #endif /* _WIN32 || MSDOS */
 
-      /* in case we built debug enabled, we allow an environment variable
-       * named CURL_TESTDIR to prefix the given filename to put it into a
-       * specific directory
-       */
-#ifdef DEBUGBUILD
-      {
-        char *tdir = curl_getenv("CURL_TESTDIR");
-        if(tdir) {
-          char *alt = aprintf("%s/%s", tdir, *filename);
-          Curl_safefree(*filename);
-          *filename = alt;
-          curl_free(tdir);
-          if(!*filename)
-            return CURLE_OUT_OF_MEMORY;
-        }
-      }
-#endif
       return CURLE_OK;
     }
   }

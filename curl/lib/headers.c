@@ -29,6 +29,7 @@
 #include "strcase.h"
 #include "sendf.h"
 #include "headers.h"
+#include "strparse.h"
 
 /* The last 3 #include files should be in this order */
 #include "curl_printf.h"
@@ -54,7 +55,7 @@ static void copy_header_external(struct Curl_header_store *hs,
      impossible for applications to do == comparisons, as that would otherwise
      be very tempting and then lead to the reserved bits not being reserved
      anymore. */
-  h->origin = (unsigned int)(hs->type | (1<<27));
+  h->origin = (unsigned int)(hs->type | (1 << 27));
   h->anchor = e;
 }
 
@@ -208,14 +209,14 @@ static CURLcode namevalue(char *header, size_t hlen, unsigned int type,
   else
     return CURLE_BAD_FUNCTION_ARGUMENT;
 
-  /* skip all leading space letters */
-  while(*header && ISBLANK(*header))
+  /* skip all leading blank letters */
+  while(ISBLANK(*header))
     header++;
 
   *value = header;
 
   /* skip all trailing space letters */
-  while((end > header) && ISSPACE(*end))
+  while((end > header) && ISBLANK(*end))
     *end-- = 0; /* nul terminate */
   return CURLE_OK;
 }
@@ -235,7 +236,7 @@ static CURLcode unfold_value(struct Curl_easy *data, const char *value,
   oalloc = olen + offset + 1;
 
   /* skip all trailing space letters */
-  while(vlen && ISSPACE(value[vlen - 1]))
+  while(vlen && ISBLANK(value[vlen - 1]))
     vlen--;
 
   /* save only one leading space */

@@ -55,7 +55,8 @@ With the curl command line tool: `--cacert [file]`
 
 If you use the curl command line tool without a native CA store, then you can
 specify your own CA cert file by setting the environment variable
-`CURL_CA_BUNDLE` to the path of your choice.
+`CURL_CA_BUNDLE` to the path of your choice. `SSL_CERT_FILE` and `SSL_CERT_DIR`
+are also supported.
 
 If you are using the curl command line tool on Windows, curl searches for a CA
 cert file named `curl-ca-bundle.crt` in these directories and in this order:
@@ -64,6 +65,9 @@ cert file named `curl-ca-bundle.crt` in these directories and in this order:
   3. Windows System directory (e.g. C:\Windows\System32)
   4. Windows Directory (e.g. C:\Windows)
   5. all directories along %PATH%
+
+curl 8.11.0 added a build-time option to disable this search behavior, and
+another option to restrict search to the application's directory.
 
 ### Use the native store
 

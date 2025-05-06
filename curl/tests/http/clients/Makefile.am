@@ -35,8 +35,7 @@ EXTRA_DIST = CMakeLists.txt
 
 AM_CPPFLAGS = -I$(top_srcdir)/include   \
               -I$(top_builddir)/lib     \
-              -I$(top_srcdir)/lib       \
-              -DCURL_DISABLE_DEPRECATION
+              -I$(top_srcdir)/lib
 
 LIBDIR = $(top_builddir)/lib
 
@@ -45,6 +44,9 @@ AM_CPPFLAGS += -DCURL_NO_OLDIES
 
 if USE_CPPFLAG_CURL_STATICLIB
 AM_CPPFLAGS += -DCURL_STATICLIB
+endif
+if DOING_NATIVE_WINDOWS
+AM_CPPFLAGS += -DWIN32_LEAN_AND_MEAN
 endif
 
 # Prevent LIBS from being used for all link targets
